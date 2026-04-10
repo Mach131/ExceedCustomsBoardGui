@@ -1,0 +1,225 @@
+
+board_size = self.getBounds().size * board_image_factor
+board_dim_ratio = image_dimensions.x / image_dimensions.z
+did_initialize = false
+
+player_history_map = {
+
+}
+
+function onload()
+    if did_initialize then
+        return
+    end
+
+    did_initialize = true
+    local base_rotation = self.getRotation()
+    self.setRotation(Vector(0, 180, 0))
+    board_size = self.getBounds().size * board_image_factor
+
+    for char_label, button_pos_px in pairs(character_coordinate_map) do
+        local button_pos = pixelToRelativeWorldPosition(button_pos_px[1], button_pos_px[2], true)
+        local char_tooltip = character_tooltip_map[char_label]
+        if char_tooltip == nil then char_tooltip = "" end
+        if character_collection_map[char_label] ~= nil then
+            char_tooltip = char_tooltip .. "\n(Left Click for Bag, Right Click for Random)"
+        end
+        local width_mult = 1
+        local height_mult = 1
+        if button_resize_map[char_label] ~= nil then
+            width_mult = button_resize_map[char_label][1]
+            height_mult = button_resize_map[char_label][2]
+        end
+        self.createButton({
+            click_function = attachArg('spawnCharacter', char_label),
+            function_owner = self,
+            position = button_pos + Vector(0, -0.2 * (0.5 - debug_button_visible), 0),
+            width = button_width * width_mult,
+            height = button_width * board_dim_ratio * height_mult,
+            tooltip = char_tooltip
+        })
+    end
+
+    self.setRotation(base_rotation)
+end
+
+function attachArg(click_function, arg)
+    local fn_name = click_function .. arg
+    _G[fn_name] = function(obj, player_color, alt_click)
+        _G[click_function](obj, player_color, alt_click, arg)
+    end
+    return fn_name
+end
+
+function spawnCharacter(_, player_color, alt_click, char_label)
+    --print('yippee ' .. char_label)
+    
+    -- The clicks are caught by UI elements, which Grey actually CAN interact with.
+    -- Nobody actually expects this, so we should ignore Grey's clicks.
+    if player_color == "Grey" then return end
+
+    local spawned_object = nil
+    local is_season_bag = false
+
+    -- Check if it's a collection; if so, choose a random appropriate char_label
+    local check_collection = character_collection_map[char_label]
+    if check_collection ~= nil then
+        collection_characters = check_collection.characters
+        collection_colors = check_collection.color_string
+        collection_passwords = check_collection.passwords
+        player_input_history = player_history_map[player_color]
+        matched_pw_char = nil
+
+
+        if collection_passwords ~= nil and player_input_history ~= nil then
+            for password_char, password_data in pairs(collection_passwords) do
+                if #player_input_history >= #password_data.sequence then
+                    password_match = true
+                    for i = 0, #password_data.sequence - 1, 1 do
+                        -- print(i .. ': ' .. password_data.sequence[#password_data.sequence - i] .. ' - ' .. player_input_history[#player_input_history - i])
+                        if password_data.sequence[#password_data.sequence - i] ~= player_input_history[#player_input_history - i] then
+                            password_match = false
+                            break
+                        end
+                    end
+                    
+                    if password_match then
+                        printToColor(password_data.message, player_color, {r=0, g=0, b=0})    
+                        matched_pw_char = password_char
+                        break
+                    end
+                end
+            end
+            player_input_history = {}
+            player_history_map[player_color] = player_input_history
+        end
+
+        if matched_pw_char ~= nil then
+            char_label = matched_pw_char
+        elseif alt_click then -- if right click, spawn a random character
+            char_label = collection_characters[math.random(#collection_characters)]
+        else -- if left click, spawn the full collection
+            local season_json_list = {}
+            for _, single_json in ipairs(collection_characters) do
+                table.insert(season_json_list, char_json_map[single_json])
+            end
+            local season_json_list_string = table.concat(season_json_list, ", ")
+
+            spawned_object = spawnObjectJSON({
+                json = [[{
+                    "Name": "Bag",
+                    "Transform": {
+                        "posX": 0,
+                        "posY": 0,
+                        "posZ": 0,
+                        "rotX": 0,
+                        "rotY": 0,
+                        "rotZ": 0,
+                        "scaleX": 1,
+                        "scaleY": 1,
+                        "scaleZ": 1
+                    },
+                    "ColorDiffuse": ]] .. collection_colors .. [[,
+                    "Nickname": "All Characters - ]] .. character_tooltip_map[char_label].. [[",
+                    "ContainedObjects": [
+                    ]] .. season_json_list_string .. [[
+                    ]
+                }]]
+            })
+            spawned_object.use_hands = true
+            is_season_bag = true
+        end
+    else
+        if player_input_history == nil then
+            player_input_history = {}
+            player_history_map[player_color] = player_input_history
+        end
+        if #player_input_history >= 10 then
+            table.remove(player_input_history, 1)
+            for i = 1, #player_input_history - 1, 1 do
+                player_input_history[i] = player_input_history[i+1]
+            end
+            table.insert(player_input_history, 10, char_label)
+        else
+            table.insert(player_input_history, char_label)
+        end
+
+        -- s = '['
+        -- for inp in player_input_history do
+        --     s = s .. inp .. ', '
+        -- end
+        -- print(s .. ']')
+    end
+
+    -- Create bag
+    if spawned_object == nil then
+        spawned_object = spawnObjectJSON({
+            json = char_json_map[char_label]
+        })
+        spawned_object.use_hands = true
+        spawned_object.memo = "selfdestruct"
+    end
+    
+    -- stolen code to move bag into player's hand
+    local playerReference = Player[player_color]
+    local charPosition = Vector(0, 0, 0)
+    local screenRotation = self.getRotation()
+    local xPositionOffset = 0
+    local zPositionOffset = 0
+    local yPositionOffset = 0
+
+    local facingFactor = 1
+    if screenRotation.z >= 90 and screenRotation.z < 270 then
+        facingFactor = -1
+    end
+
+    if screenRotation.y >= 45 and screenRotation.y < 135 then
+        xPositionOffset = -1.1*facingFactor*charPosition.z
+        yPositionOffset = charPosition.y
+        zPositionOffset = -1.1*charPosition.x
+    elseif screenRotation.y >= 135 and screenRotation.y < 225 then
+        xPositionOffset = -1.1*facingFactor*charPosition.x
+        yPositionOffset = facingFactor*charPosition.y
+        zPositionOffset = 1.1*charPosition.z
+    elseif screenRotation.y >= 225 and screenRotation.y < 315 then
+        xPositionOffset = 1.1*facingFactor*charPosition.z
+        yPositionOffset = facingFactor*charPosition.y
+        zPositionOffset = 1.1*charPosition.x
+    elseif screenRotation.y >= 315 or screenRotation.y < 45 then
+        xPositionOffset = 1.1*facingFactor*charPosition.x
+        yPositionOffset = facingFactor*charPosition.y
+        zPositionOffset = -1.1*charPosition.z
+    end
+    local playerHandTransform = playerReference.getHandTransform() or {
+        position = {
+            x = xPositionOffset + self.getPosition().x,
+            y = 10 + yPositionOffset + self.getPosition().y,
+            z = zPositionOffset + self.getPosition().z,
+        },
+        rotation = self.getRotation(),
+    }
+
+    spawned_object.setPosition(playerHandTransform.position);
+    spawned_object.setRotation(playerHandTransform.rotation);
+    if not is_season_bag then
+        spawned_object.setScale(Vector(0.9, 0.6, 0.9))
+    end
+end
+
+function pixelToRelativeWorldPosition(x, z, return_local)
+    local x_ratio = ((x / image_dimensions.x) - 0.5) * 2
+    local z_ratio = ((z / image_dimensions.z) - 0.5) * -2
+
+    local result = Vector(
+        (board_size.x / 2) * x_ratio,
+        board_size.y,
+        (board_size.z / 2) * z_ratio
+    )
+
+    if return_local then
+        result.x = result.x * -1
+        result = self.positionToLocal(self.getPosition() + result)
+    end
+
+    return result
+end

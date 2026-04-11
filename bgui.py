@@ -1,4 +1,5 @@
 import json
+import luadata
 import math
 import requests
 
@@ -13,6 +14,9 @@ try:
     bundle_dir = sys._MEIPASS
 except:
     bundle_dir = path.abspath(path.dirname('./bgui.py'))
+
+BOARD_PARSE_VERSION = 0
+BOARD_VERSION_PREFIX = "-- ECBG: Parser Version "
 
 CROSS_BUTTON_PATH = path.join(bundle_dir, './resources/cross-button.png')
 OBJECT_TEMPLATE_PATH = path.join(bundle_dir, './resources/object_template.txt')
@@ -42,8 +46,6 @@ PARSEDICT_CHAR_RESIZE = "char_resize"
 PARSEDICT_CHAR_TOOLTIPS = "char_tooltip"
 PARSEDICT_CHAR_COLLECTIONS = "char_collections"
 PARSEDICT_CHAR_JSONS = "char_json"
-
-# TODO: pretty sure everything's working, just export; maybe allow some sort of full clear so you can reload a board
 
 # https://gis.stackexchange.com/questions/350148/qcombobox-multiple-selection-pyqt5
 class CheckableComboBox(qw.QComboBox):
@@ -289,7 +291,7 @@ class BoardImageUpload(qw.QWidget):
         if self.pixmap is not None:
             self.clear_callback()
         
-        with open(filename, 'r') as f:
+        with open(filename, 'r', encoding='utf-8') as f:
             board_json = json.load(f)["ObjectStates"][0]
             board_nickname = board_json["Nickname"]
             board_image_url = board_json["CustomImage"]["ImageURL"]
@@ -302,12 +304,18 @@ class BoardImageUpload(qw.QWidget):
             board_script_tooltips, board_script = board_script.split(BGUI_SECTION_COLLECTIONS)
             board_script_collections, board_script = board_script.split(BGUI_SECTION_JSONS)
             board_script_jsons, board_script = board_script.split(BGUI_SECTION_BODY)
+
+            parse_version = 0
             
             parse_dict = {PARSEDICT_NICKNAME: board_nickname, PARSEDICT_IMAGE_URL: board_image_url}
             for line in board_script_preamble.strip().splitlines():
                 ls = line.strip()
+                if ls.startswith(BOARD_VERSION_PREFIX):
+                    value = int(ls[len(BOARD_VERSION_PREFIX):].strip())
+                    parse_version = value
                 if ls.startswith("button_width"):
-                    value = int(ls.split("=")[1].strip())
+                    uncommented_value = ls.split("--")[0]
+                    value = int(uncommented_value.split("=")[1].strip())
                     parse_dict[PARSEDICT_BUTTON_WIDTH] = value
 
             char_defs = []
@@ -319,7 +327,11 @@ class BoardImageUpload(qw.QWidget):
 
             char_coord_dict = {}
             for line in board_script_coordinates.strip().splitlines()[1:]:
+                if line.startswith('--'):
+                    continue
                 ls = line.strip().split('=', 1)
+                if ls[0].strip() == 'character_coordinate_map':
+                    continue
                 if len(ls) == 2:
                     char = ls[0].strip()
                     coords = ls[1].replace('{', '').replace('}', '').split(',')
@@ -328,7 +340,11 @@ class BoardImageUpload(qw.QWidget):
 
             char_resize_dict = {}
             for line in board_script_resize.strip().splitlines()[1:]:
+                if line.startswith('--'):
+                    continue
                 ls = line.strip().split('=', 1)
+                if ls[0].strip() == 'button_resize_map':
+                    continue
                 if len(ls) == 2:
                     char = ls[0].strip()
                     coords = ls[1].replace('{', '').replace('}', '').split(',')
@@ -337,7 +353,11 @@ class BoardImageUpload(qw.QWidget):
 
             char_tooltip_dict = {}
             for line in board_script_tooltips.strip().splitlines()[1:]:
+                if line.startswith('--'):
+                    continue
                 ls = line.strip().split('=', 1)
+                if ls[0].strip() == 'character_tooltip_map':
+                    continue
                 if len(ls) == 2:
                     char = ls[0].strip()
                     tooltip = ls[1].strip(' ,')[1:-1]
@@ -345,51 +365,60 @@ class BoardImageUpload(qw.QWidget):
             parse_dict[PARSEDICT_CHAR_TOOLTIPS] = char_tooltip_dict
 
             char_collection_dict = {}
-            current_group = []
-            current_subgroup = []
+            current_collection_char = ""
+            current_collection_string = ""
+            scanning_group = False
             for line in board_script_collections.strip().splitlines()[1:]:
-                group_state = len(current_group)
-                if group_state == 0:
-                    ls = line.strip().split('=', 1)
-                    if len(ls) == 2:
-                        current_group.append(ls[0].strip())
-                elif group_state == 1:
-                    char_list = line.split('=')[1].strip(' ,')[1:-1]
-                    current_group.append(char_list.split(', '))
-                elif group_state in (2, 6):
-                    current_group.append('')
-                elif group_state in [3, 4, 5]:
-                    current_group.append(float(line.split(': ')[1].strip(' ,')))
+                if scanning_group:
+                    new_line = line.strip()
+                    if new_line.startswith("characters =") or new_line.startswith("sequence ="):
+                        for char in parse_dict[PARSEDICT_CHAR_DEFS]:
+                            new_line = new_line.replace(char, f'"{char}"')
+                    elif new_line == "color_string = [[{":
+                        new_line = "color_string = {"
+                    elif new_line.startswith("}]]"):
+                        new_line = "}" + (',' if new_line[-1] == ',' else '')
+                    current_collection_string += new_line
 
-                elif group_state == 7:
-                    char_collection_dict[current_group[0]] = (current_group[1], (current_group[3], current_group[4], current_group[5]), {})
-                    if 'passwords' not in line:
-                        current_group = []
-                    else:
-                        current_group.append('')
-                        current_subgroup = []
-                else:
-                    subgroup_state = len(current_subgroup)
-                    if subgroup_state == 0:
+                if line.startswith('\t') and not line.startswith('\t\t'):
+                    if not scanning_group:
                         ls = line.strip().split('=', 1)
-                        current_subgroup.append(ls[0].strip())
-                    elif subgroup_state == 1:
-                        seq_list = line.split('=')[1].strip(' ,')[1:-1]
-                        current_subgroup.append(seq_list.split(', '))
-                    elif subgroup_state == 2:
-                        message = line.split('=')[1].strip(' ')[1:-1]
-                        current_subgroup.append(message)
-                    elif subgroup_state == 3:
-                        char_collection_dict[current_group[0]][2][current_subgroup[0]] = (current_subgroup[1], current_subgroup[2])
-                        current_subgroup = []
-                        if ',' not in line:
-                            current_group = []
+                        if len(ls) == 2:
+                            scanning_group = True
+                            current_collection_char = ls[0].strip()
+                            current_collection_string = ls[1].strip()
+                    else:
+                        if current_collection_string[-1] == ',':
+                            current_collection_string = current_collection_string[:-1]
+                        for color_prefix in ('"r": ', '"g": ', '"b": '):
+                            current_collection_string = current_collection_string.replace(color_prefix, f'{color_prefix[1]} = ')
+
+                        current_collection_json = luadata.unserialize(current_collection_string)
+
+                        password_set = {}
+                        char_collection_dict[current_collection_char] = (
+                            current_collection_json['characters'],
+                            (current_collection_json['color_string']['r'], current_collection_json['color_string']['g'], current_collection_json['color_string']['b']),
+                            password_set,
+                            (current_collection_json.get('left_click_spawn_random', False), current_collection_json.get('right_click_spawn_random', True)),
+                            current_collection_json.get('random_weights', {})
+                        )
+                        for password_char in current_collection_json.get('passwords', []):
+                            password_data = current_collection_json['passwords'][password_char]
+                            password_set[password_char] = (password_data['sequence'], password_data['message'])
+
+
+                        scanning_group = False
 
             parse_dict[PARSEDICT_CHAR_COLLECTIONS] = char_collection_dict
 
             char_json_dict = {}
             for line in board_script_jsons.strip().splitlines()[1:]:
+                if line.startswith('--'):
+                    continue
                 ls = line.strip().split('=', 1)
+                if ls[0].strip() == 'character_tooltip_map':
+                    continue
                 if len(ls) == 2:
                     char = ls[0].strip()
                     json_core = ls[1].strip(' ,[]')[1:-1]
@@ -411,7 +440,8 @@ class CharJsonUpload(qw.QWidget):
         layout_json_prefix = qw.QVBoxLayout()
         json_load_btn = qw.QPushButton('Browse')
         json_load_btn.clicked.connect(self.open_json_file)
-        layout_json_prefix.addWidget(qw.QLabel('Full character JSON: '))
+        main_label = qw.QLabel('Full character JSON: ')
+        layout_json_prefix.addWidget(main_label)
         layout_json_prefix.addWidget(json_load_btn)
 
         layout.addLayout(layout_json_prefix)
@@ -422,6 +452,8 @@ class CharJsonUpload(qw.QWidget):
         layout.addWidget(self.char_json_entry)
 
         self.setLayout(layout)
+        main_label.setToolTip("The full JSON for the character (don't worry about doing any reformatting, like you would if you've messed with the script directly before).\n" + \
+                        "You should be able to drag and drop a JSON file into the text box, or you can press Browse to add one normally.")
 
     def get_json_text(self):
         return self.char_json_entry.toPlainText()
@@ -481,31 +513,41 @@ class BoardButtonField(qw.QWidget):
 
         self.preview_image = qw.QLabel()
         self.preview_image.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.preview_image.setToolTip("Preview of what part of the image the button will include.\n" + \
+                                      "(You can drag this whole block above/below other characters/groups to reorder, if needed.)")
         layout.addWidget(self.preview_image)
 
         layout_fields = qw.QVBoxLayout()
         layout_fields_top = qw.QHBoxLayout()
         layout_fields_top.setSpacing(10)
 
-        layout_fields_top.addWidget(qw.QLabel('ID: '))
+        id_label = qw.QLabel('ID: ')
+        layout_fields_top.addWidget(id_label)
+        id_label.setToolTip("The ID for this character/group. Should be unique from every other ID, and only use alphanumeric characters and/or underscores.")
         self.id_entry = qw.QLineEdit()
         self.id_entry.setText(id)
         self.id_entry.textChanged.connect(self.set_id)
         layout_fields_top.addWidget(self.id_entry)
 
         if allow_hide:
-            layout_fields_top.addWidget(qw.QLabel('Hide on Board?'))
+            hide_label = qw.QLabel('Hide on Board?')
+            layout_fields_top.addWidget(hide_label)
+            hide_label.setToolTip("Check this if the character shouldn't have a button on the board. Useful for password-only characters.")
             self.hide_on_board_checkbox = qw.QCheckBox()
             self.hide_on_board_checkbox.setChecked(False)
             self.hide_on_board_checkbox.clicked.connect(self.set_hide_on_board)
             layout_fields_top.addWidget(self.hide_on_board_checkbox)
 
-        layout_fields_top.addWidget(qw.QLabel('Button Label: '))
+        label_label = qw.QLabel('Button Label: ')
+        layout_fields_top.addWidget(label_label)
+        label_label.setToolTip("The tooltip that will appear when hovering over the button in TTS.")
         self.char_label_entry = qw.QLineEdit()
         self.char_label_entry.textChanged.connect(self.set_char_label)
         layout_fields_top.addWidget(self.char_label_entry)
 
-        layout_fields_top.addWidget(qw.QLabel('x: '))
+        x_label = qw.QLabel('x: ')
+        layout_fields_top.addWidget(x_label)
+        x_label.setToolTip("The horizontal position of the center of the button, in pixels.")
         self.x_spinner = qw.QSpinBox()
         self.x_spinner.setMinimum(0)
         self.x_spinner.setMaximum(1000000)
@@ -513,7 +555,9 @@ class BoardButtonField(qw.QWidget):
         self.x_spinner.valueChanged.connect(self.update_button_x)
         layout_fields_top.addWidget(self.x_spinner)
 
-        layout_fields_top.addWidget(qw.QLabel('y: '))
+        y_label = qw.QLabel('y: ')
+        layout_fields_top.addWidget(y_label)
+        y_label.setToolTip("The vertical position of the center of the button, in pixels.")
         self.y_spinner = qw.QSpinBox()
         self.y_spinner.setMinimum(0)
         self.y_spinner.setMaximum(1000000)
@@ -521,7 +565,9 @@ class BoardButtonField(qw.QWidget):
         self.y_spinner.valueChanged.connect(self.update_button_y)
         layout_fields_top.addWidget(self.y_spinner)
 
-        layout_fields_top.addWidget(qw.QLabel('w: '))
+        w_label = qw.QLabel('w: ')
+        layout_fields_top.addWidget(w_label)
+        w_label.setToolTip("The horizontal size (width) of the button, in pixels.")
         self.w_spinner = qw.QSpinBox()
         self.w_spinner.setMinimum(0)
         self.w_spinner.setMaximum(1000000)
@@ -530,7 +576,9 @@ class BoardButtonField(qw.QWidget):
         self.w_spinner.valueChanged.connect(self.update_button_w)
         layout_fields_top.addWidget(self.w_spinner)
 
-        layout_fields_top.addWidget(qw.QLabel('h: '))
+        h_label = qw.QLabel('h: ')
+        layout_fields_top.addWidget(h_label)
+        h_label.setToolTip("The vertical size (height) of the button, in pixels.")
         self.h_spinner = qw.QSpinBox()
         self.h_spinner.setMinimum(0)
         self.h_spinner.setMaximum(1000000)
@@ -674,26 +722,104 @@ class GroupField(BoardButtonField):
 
     def setup_additional_layout_fields(self, layout_fields, *setup_params):
         char_widgets : list[CharacterField] = setup_params[0]
+        self.random_char_weights = {}
+
+        layout_fields.setSpacing(10)
 
         layout_fields_bottom = qw.QHBoxLayout()
 
         layout_fields_bottom.addStretch()
-        layout_fields_bottom.addWidget(qw.QLabel('Included Characters: '))
+
+        layout_fields_main = qw.QVBoxLayout()
+        layout_fields_main.setSpacing(2)
+
+        layout_fields_main_characters = qw.QHBoxLayout()
+        include_label = qw.QLabel('Included Characters: ')
+        layout_fields_main_characters.addWidget(include_label)
+        include_label.setToolTip("The list of characters included in this group's pool of options.")
         self.member_selection = CheckableComboBox()
         self.member_selection.setMinimumWidth(int(self.width() * 0.5))
+        self.member_selection.currentTextChanged.connect(self.rescan_weights)
         self.rename_signals = []
         for char in char_widgets:
             self.add_char(char)
-        layout_fields_bottom.addWidget(self.member_selection)
+        layout_fields_main_characters.addWidget(self.member_selection)
+        layout_fields_main.addLayout(layout_fields_main_characters)
+
+        layout_fields_main_clicks = qw.QHBoxLayout()
+        layout_fields_main_clicks.addStretch()
+        self.left_click_spawns_random = False
+        self.right_click_spawns_random = True
+
+        # Left click
+        self.left_click_button_group = qw.QButtonGroup()
+        layout_left_click_button_group = qw.QVBoxLayout()
+        layout_left_click_button_group.setSpacing(5)
+
+        left_label = qw.QLabel("Left Click Function:")
+        layout_left_click_button_group.addWidget(left_label)
+        left_label.setToolTip("What to spawn when left-clicking this group button.")
+        self.left_click_random_button = qw.QRadioButton("Spawn Random Character")
+        self.left_click_random_button.setToolTip("When left-clicking, spawn a random character from the included characters.")
+        self.left_click_random_button.clicked.connect(lambda x: self.left_click_function_toggled(True))
+        self.left_click_button_group.addButton(self.left_click_random_button)
+        layout_left_click_button_group.addWidget(self.left_click_random_button)
+
+        self.left_click_group_button = qw.QRadioButton("Spawn Full Group Bag")
+        self.left_click_group_button.setToolTip("When left-clicking, spawn a bag containing all of the included characters.")
+        self.left_click_group_button.click()
+        self.left_click_group_button.clicked.connect(lambda x: self.left_click_function_toggled(False))
+        self.left_click_button_group.addButton(self.left_click_group_button)
+        layout_left_click_button_group.addWidget(self.left_click_group_button)
+
+        layout_fields_main_clicks.addLayout(layout_left_click_button_group)
+
+        # Right click
+        self.right_click_button_group = qw.QButtonGroup()
+        layout_right_click_button_group = qw.QVBoxLayout()
+        layout_right_click_button_group.setSpacing(5)
+
+        right_label = qw.QLabel("Right Click Function:")
+        layout_right_click_button_group.addWidget(right_label)
+        right_label.setToolTip("What to spawn when right-clicking this group button.")
+        self.right_click_random_button = qw.QRadioButton("Spawn Random Character")
+        self.right_click_random_button.setToolTip("When right-clicking, spawn a random character from the included characters.")
+        self.right_click_random_button.click()
+        self.right_click_random_button.clicked.connect(lambda x: self.right_click_function_toggled(True))
+        self.right_click_button_group.addButton(self.right_click_random_button)
+        layout_right_click_button_group.addWidget(self.right_click_random_button)
+
+        self.right_click_group_button = qw.QRadioButton("Spawn Full Group Bag")
+        self.right_click_group_button.setToolTip("When right-clicking, spawn a bag containing all of the included characters.")
+        self.right_click_group_button.clicked.connect(lambda x: self.right_click_function_toggled(False))
+        self.right_click_button_group.addButton(self.right_click_group_button)
+        layout_right_click_button_group.addWidget(self.right_click_group_button)
+
+        layout_fields_main_clicks.addLayout(layout_right_click_button_group)
+
+        # done with click toggles
+
+        layout_fields_main_clicks.addStretch()
+        self.weights_window = None
+        weights_button = qw.QPushButton("Edit Random\nWeights")
+        weights_button.setToolTip("Adjust the relative chances for characters to show up when spawning a random character.")
+        weights_button.clicked.connect(self.open_weights_window)
+        layout_fields_main_clicks.addWidget(weights_button)
+
+        layout_fields_main_clicks.addStretch()
+        layout_fields_main.addLayout(layout_fields_main_clicks)
+        layout_fields_bottom.addLayout(layout_fields_main)
 
         layout_fields_bottom.addStretch()
 
         self.bag_color = qg.QColor()
         color_select_button = qw.QPushButton('Change Bag Color')
+        color_select_button.setToolTip("Adjust the color of the bag spawned when creating a full group bag.")
         color_select_button.clicked.connect(self.select_color)
         layout_fields_bottom.addWidget(color_select_button)
 
         self.preview_field = qw.QGraphicsView()
+        self.preview_field.setToolTip("A preview of the selected full group bag color.")
         self.preview_field.resize(32, 32)
         self.preview_field.setStyleSheet('background:transparent')
         scene = qw.QGraphicsScene()
@@ -709,6 +835,7 @@ class GroupField(BoardButtonField):
         self.passwords = {}
         self.password_window = None
         password_button = qw.QPushButton("Edit Password\nCharacters")
+        password_button.setToolTip("Edit sequences of characters that can be used to spawn other (secret) characters with this group button.")
         password_button.clicked.connect(self.open_password_window)
         layout_fields_bottom.addWidget(password_button)
 
@@ -741,10 +868,16 @@ class GroupField(BoardButtonField):
         char_idx = self.find_char(char_widget)
         self.member_selection.removeItem(char_idx)
         self.member_selection.updateText()
+        self.random_char_weights.pop(char_widget.char_label)
         
     def update_char_id(self, char_widget : CharacterField, new_id : str):
         char_idx = self.find_char(char_widget)
+        old_id = self.member_selection.itemText(char_idx)
         self.member_selection.setItemText(char_idx, new_id)
+
+        if old_id in self.random_char_weights:
+            old_weight = self.random_char_weights.pop(old_id)
+            self.random_char_weights[new_id] = old_weight
         self.member_selection.updateText()
 
     def select_color(self, _=None, color=None):
@@ -764,10 +897,71 @@ class GroupField(BoardButtonField):
             self.password_window = GroupPasswordEditor(self)
         self.password_window.show()
 
+    def open_weights_window(self):
+        if self.weights_window is not None and not self.weights_window.isVisible():
+            self.weights_window.deleteLater()
+            self.weights_window = None
+
+        if self.weights_window is None:
+            self.weights_window = GroupRandomWeightEditor(self)
+        self.weights_window.show()
+
+    def left_click_function_toggled(self, state):
+        self.left_click_spawns_random = state
+
+    def right_click_function_toggled(self, state):
+        self.right_click_spawns_random = state
+
+    def rescan_weights(self):
+        for char_idx in range(self.member_selection.count()):
+            char = self.member_selection.itemText(char_idx)
+            if char in self.random_char_weights and self.member_selection.model().item(char_idx).checkState() == Qt.Unchecked:
+                self.random_char_weights.pop(char)
+
+class GroupRandomWeightEditor(qw.QDialog):
+    def __init__(self, group_field : GroupField, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.setWindowTitle(f"Random Weights for {group_field.char_label}")
+        self.group_field = group_field
+        layout = qw.QVBoxLayout()
+        weight_label = qw.QLabel(f"Editing Random Character Weights")
+        layout.addWidget(weight_label)
+
+        self.layout_seq_list = qw.QVBoxLayout()
+        for char_idx in range(self.group_field.member_selection.count()):
+            if self.group_field.member_selection.model().item(char_idx).checkState() == Qt.Checked:
+                char = self.group_field.member_selection.itemText(char_idx)
+                self.add_seq_char_layout(char)
+        layout.addLayout(self.layout_seq_list)
+
+        self.setLayout(layout)
+    
+    def add_seq_char_layout(self, seq_char):
+        layout_char = qw.QHBoxLayout()
+
+        char_label = qw.QLabel("    " + seq_char)
+        layout_char.addWidget(char_label)
+        char_label.setToolTip("Change the number next to a character to adjust their chances of spawning with this random button (default is 1.0).\n" + \
+                                "For instance, if you have one character with a weight of 3 and another with a weight of 1, the first one will spawn 3 times as often.")
+        weight_spinner = qw.QDoubleSpinBox()
+        weight_spinner.setMinimum(0)
+        weight_spinner.setMaximum(2147483647)
+        weight_spinner.setValue(self.group_field.random_char_weights.get(seq_char, 1))
+        weight_spinner.valueChanged.connect(lambda v: self.update_weight(seq_char, v))
+        layout_char.addWidget(weight_spinner)
+
+        self.layout_seq_list.addLayout(layout_char)
+
+    def update_weight(self, char, new_value):
+        self.group_field.random_char_weights[char] = new_value
+
+
 class GroupPasswordEditor(qw.QDialog):
     def __init__(self, group_field : GroupField, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.setWindowTitle(f"Passwords for {group_field.char_label}")
         self.group_field = group_field
         self.password_char_window = None
         self.char_password_map = {}
@@ -787,6 +981,7 @@ class GroupPasswordEditor(qw.QDialog):
             self.add_character_dropdown.addItem(self.group_field.member_selection.itemText(i))
         layout_add_char.addWidget(self.add_character_dropdown)
         add_character_button = qw.QPushButton("Add Hidden Character")
+        add_character_button.setToolTip("Add a new character that can be spawned with a 'password' sequence.")
         add_character_button.pressed.connect(self.add_password_character)
         layout_add_char.addWidget(add_character_button)
 
@@ -797,9 +992,11 @@ class GroupPasswordEditor(qw.QDialog):
         layout_char = qw.QHBoxLayout()
         layout_char.addWidget(qw.QLabel(password_char))
         edit_button = qw.QPushButton("Edit Sequence")
+        edit_button.setToolTip("Edit this character's password sequence.")
         edit_button.clicked.connect(lambda x: self.open_password_character(password_char))
         layout_char.addWidget(edit_button)
         delete_button = qw.QPushButton("Remove")
+        delete_button.setToolTip("Remove this character's password sequence (they will no longer be spawnable through a password).")
         delete_button.clicked.connect(lambda x: self.remove_password_character(password_char))
         layout_char.addWidget(delete_button)
         self.layout_char_list.addLayout(layout_char)
@@ -829,6 +1026,7 @@ class GroupPasswordCharEditor(qw.QDialog):
     def __init__(self, group_field : GroupField, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.setWindowTitle("Password Sequence")
         self.group_field = group_field
         
     def load_char(self, char_label):
@@ -837,7 +1035,11 @@ class GroupPasswordCharEditor(qw.QDialog):
         self.char_label = char_label
         layout = qw.QVBoxLayout()
 
-        layout.addWidget(qw.QLabel(f"Editing Password Sequence for: {self.char_label}"))
+        self.setWindowTitle(f"Password Sequence: {self.char_label}")
+        title_label = qw.QLabel(f"Editing Password Sequence for: {self.char_label}")
+        layout.addWidget(title_label)
+        title_label.setToolTip("Define a password sequence by adding characters; if someone presses their buttons in order (from top to bottom)\n" + \
+                               "and then presses on this group button, the secret character will spawn (and the message will be shown to the player who spawned them).")
 
         self.layout_seq_list = qw.QVBoxLayout()
         self.password_data = self.group_field.passwords[char_label]
@@ -852,12 +1054,16 @@ class GroupPasswordCharEditor(qw.QDialog):
             self.add_character_dropdown.addItem(self.group_field.member_selection.itemText(i))
         layout_add_char.addWidget(self.add_character_dropdown)
         add_character_button = qw.QPushButton("Add Sequence Character")
+        add_character_button.setToolTip("Add a character to the end of the password sequence.")
         add_character_button.pressed.connect(self.add_sequence_character)
         layout_add_char.addWidget(add_character_button)
         layout.addLayout(layout_add_char)
 
         layout_spawn_message = qw.QHBoxLayout()
-        layout_spawn_message.addWidget(qw.QLabel("Spawn Message: "))
+        spawn_label = qw.QLabel("Spawn Message: ")
+        layout_spawn_message.addWidget(spawn_label)
+        spawn_label.setToolTip("A message to be shown to the player who spawns the secret character through this group button.\n" + \
+                               "(Note that if the character can also appear as a normal random option, this message will also show if they get rolled.)")
         self.spawn_message_box = qw.QLineEdit(self.group_field.passwords[self.char_label][1])
         self.spawn_message_box.textChanged.connect(self.update_spawn_message)
         layout_spawn_message.addWidget(self.spawn_message_box)
@@ -869,6 +1075,7 @@ class GroupPasswordCharEditor(qw.QDialog):
         layout_char = qw.QHBoxLayout()
         layout_char.addWidget(qw.QLabel(seq_char))
         delete_button = qw.QPushButton("Remove")
+        delete_button.setToolTip("Remove this step of the password sequence.")
         delete_button.clicked.connect(lambda x: self.remove_sequence_character(layout_char))
         layout_char.addWidget(delete_button)
         self.layout_seq_list.addLayout(layout_char)
@@ -906,6 +1113,7 @@ class SaveWindow(qw.QDialog):
         script_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(script_label)
         script_display = qw.QPlainTextEdit()
+        script_display.setToolTip("A preview of the script portion of the board.")
         script_display.setPlainText(board_script)
         script_display.setReadOnly(True)
         layout.addWidget(script_display)
@@ -916,11 +1124,15 @@ class SaveWindow(qw.QDialog):
         layout_properties = qw.QHBoxLayout()
         layout_properties.addStretch()
 
-        layout_properties.addWidget(qw.QLabel("Board Image URL"))
+        url_label = qw.QLabel("Board Image URL")
+        layout_properties.addWidget(url_label)
+        url_label.setToolTip("The URL where the board image is hosted; unfortunately needs to be uploaded separately if you've been working with a local image file.")
         self.image_box = qw.QLineEdit()
         self.image_box.setText(image_url)
         layout_properties.addWidget(self.image_box)
-        layout_properties.addWidget(qw.QLabel("Object Name"))
+        name_label = qw.QLabel("Object Name")
+        layout_properties.addWidget(name_label)
+        name_label.setToolTip("The name of the TTS board object.")
         self.nickname_box = qw.QLineEdit()
         self.nickname_box.setText(nickname)
         layout_properties.addWidget(self.nickname_box)
@@ -956,7 +1168,9 @@ class MainWindow(qw.QMainWindow):
         layout_sections.addWidget(self.board_image)
 
         layout_globals = qw.QHBoxLayout()
-        layout_globals.addWidget(qw.QLabel('Default Button Size - '))
+        default_button_label = qw.QLabel('Default Button Size - ')
+        layout_globals.addWidget(default_button_label)
+        default_button_label.setToolTip("The default height and width for new buttons; if most of your buttons are the same size, it's recommended to have this match that.")
 
         layout_globals.addWidget(qw.QLabel('w: '))
         self.default_button_w = 100
@@ -1011,6 +1225,7 @@ class MainWindow(qw.QMainWindow):
         layout_build = qw.QHBoxLayout()
         layout_build.addStretch()
         self.build_button = qw.QPushButton('Build Board')
+        self.build_button.setToolTip("Prepare the board to be exported as a TTS object.")
         self.build_button.setEnabled(False)
         self.build_button.clicked.connect(self.buildScript)
         layout_build.addWidget(self.build_button)
@@ -1030,12 +1245,16 @@ class MainWindow(qw.QMainWindow):
         self.setCentralWidget(self.scroll_area)
 
     def clear(self):
-        for i in range(self.group_layout_group.count(), -1, -1):
+        for i in range(self.group_layout_group.count()-1, -1, -1):
             target_item = self.group_layout_group.itemAt(i)
             self.group_layout_group.removeItem(target_item)
-        for i in range(self.character_layout_group.count(), -1, -1):
+            deleteLayout(target_item.layout())
+            target_item.widget().deleteLater()
+        for i in range(self.character_layout_group.count()-1, -1, -1):
             target_item = self.character_layout_group.itemAt(i)
             self.character_layout_group.removeItem(target_item)
+            deleteLayout(target_item.layout())
+            target_item.widget().deleteLater()
 
         self.group_widgets.clear()
         self.char_widgets.clear()
@@ -1081,6 +1300,7 @@ class MainWindow(qw.QMainWindow):
                     new_char.h_spinner.setValue(int(button_size_scaling[1] * self.default_button_w))
             else:
                 new_char.hide_on_board_checkbox.setChecked(True)
+                new_char.set_hide_on_board(True)
             new_char.char_json_entry.char_json_entry.setPlainText(char_json_map[char_def])
         
         for group_def in group_defs:
@@ -1096,7 +1316,7 @@ class MainWindow(qw.QMainWindow):
                 button_size_scaling = char_resize_map[group_def]
                 new_group.w_spinner.setValue(int(button_size_scaling[0] * self.default_button_w))
                 new_group.h_spinner.setValue(int(button_size_scaling[1] * self.default_button_w))
-            char_defs, group_color, group_passwords = char_collection_map[group_def]
+            char_defs, group_color, group_passwords, group_btn_funcs, group_weights = char_collection_map[group_def]
             
             for i in range(new_group.member_selection.count()):
                 char_item = new_group.member_selection.itemText(i)
@@ -1108,7 +1328,16 @@ class MainWindow(qw.QMainWindow):
             new_group.select_color(color=color)
 
             for password_char in group_passwords:
-                new_group.passwords[password_char] = list(group_passwords[password_char])
+                new_group.passwords[password_char] = [group_passwords[password_char][0], group_passwords[password_char][1].replace('\\\'', '\'')]
+
+            # only changing if they don't match defaults
+            if group_btn_funcs[0] == True:
+                new_group.left_click_random_button.click()
+            if group_btn_funcs[1] == False:
+                new_group.right_click_group_button.click()
+
+            for weight_char in group_weights:
+                new_group.random_char_weights[weight_char] = group_weights[weight_char]
 
         # Do at the end so update_board_image doesn't overwrite
         self.board_nickname = parse_dict[PARSEDICT_NICKNAME]
@@ -1119,8 +1348,10 @@ class MainWindow(qw.QMainWindow):
         for group_widget in self.char_widgets + self.group_widgets:
             group_widget.update_board_image(self.board_image.pixmap)
         self.add_character_button.setText('Add Character')
+        self.add_character_button.setToolTip("Add data for a new character.")
         self.add_character_button.setEnabled(True)
         self.add_group_button.setText('Add Group/Random Button')
+        self.add_group_button.setToolTip("Add data for a collection of characters that have an associated random and/or group spawn button.")
         self.add_group_button.setEnabled(True)
         self.build_button.setEnabled(True)
         if self.board_image.pixmap:
@@ -1153,7 +1384,7 @@ class MainWindow(qw.QMainWindow):
         new_group.addWidget(new_widget)
 
         delete_button = qw.QPushButton(qg.QIcon(CROSS_BUTTON_PATH), '')
-        delete_button.setToolTip("Delete")
+        delete_button.setToolTip("Delete this character/group.")
         delete_button.clicked.connect(lambda: self.delete_group(add_char, new_frame, new_widget))
         new_group.addWidget(delete_button)
 
@@ -1298,21 +1529,32 @@ class MainWindow(qw.QMainWindow):
                     f"\t\t\t\"r\": {bag_color[0]:.4f},\n" + \
                     f"\t\t\t\"g\": {bag_color[1]:.4f},\n" + \
                     f"\t\t\t\"b\": {bag_color[2]:.4f}\n" + \
-                    "\t\t}]]"
+                    "\t\t}]],\n"
                 
                 if group.passwords:
-                    group_string += ",\n\t\tpasswords = {\n"
+                    group_string += "\t\tpasswords = {\n"
                     pw_strings = []
                     for pw_char in group.passwords:
                         pw_string  = f"\t\t\t{pw_char} = {{\n"
                         pw_string += f"\t\t\t\tsequence = {{{", ".join(group.passwords[pw_char][0])}}},\n"
-                        pw_string += f"\t\t\t\tmessage = '{group.passwords[pw_char][1]}'\n"
+                        pw_string += f"\t\t\t\tmessage = '{group.passwords[pw_char][1].replace('\'', '\\\'')}'\n"
                         pw_string += f"\t\t\t}}"
                         pw_strings.append(pw_string)
                     group_string += ',\n'.join(pw_strings)
-                    group_string += "\n\t\t}\n"
-                else:
-                    group_string += "\n"
+                    group_string += "\n\t\t},\n"
+
+                if group.random_char_weights:
+                    group_string += "\t\trandom_weights = {\n"
+                    rw_strings = []
+                    for rw_char in group.random_char_weights:
+                        if group.random_char_weights[rw_char] == 1:
+                            continue
+                        rw_strings.append(f"\t\t\t{rw_char} = {group.random_char_weights[rw_char]}")
+                    group_string += ',\n'.join(rw_strings)
+                    group_string += "\n\t\t},\n"
+
+                group_string += f"\t\tleft_click_spawn_random = {'true' if group.left_click_spawns_random else 'false'},\n"
+                group_string += f"\t\tright_click_spawn_random = {'true' if group.right_click_spawns_random else 'false'}\n"
                 
                 group_string += "\t}"
                 
@@ -1332,6 +1574,7 @@ class MainWindow(qw.QMainWindow):
             # Assemble full script - prepend these fields with tags so they can be parsed later
 
             full_script = \
+                f"{BOARD_VERSION_PREFIX} {BOARD_PARSE_VERSION}\n" + \
                 f"{BGUI_SECTION_PREAMBLE}\n{script_preamble}\n" + \
                 f"{BGUI_SECTION_DEFINITIONS}\n{script_id_definitions}\n" + \
                 f"{BGUI_SECTION_COORDINATES}\n{script_coordinate_map}\n" + \

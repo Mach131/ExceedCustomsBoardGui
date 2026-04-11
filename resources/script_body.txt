@@ -67,9 +67,16 @@ function spawnCharacter(_, player_color, alt_click, char_label)
         collection_characters = check_collection.characters
         collection_colors = check_collection.color_string
         collection_passwords = check_collection.passwords
+        collection_weights = check_collection.random_weights
         player_input_history = player_history_map[player_color]
         matched_pw_char = nil
 
+        is_random_click = alt_click -- default to random_character spawn on right click
+        if alt_click and check_collection.right_click_spawn_random ~= nil then
+            is_random_click = check_collection.right_click_spawn_random
+        elseif not alt_click and check_collection.left_click_spawn_random ~= nil then
+            is_random_click = check_collection.left_click_spawn_random
+        end
 
         if collection_passwords ~= nil and player_input_history ~= nil then
             for password_char, password_data in pairs(collection_passwords) do
@@ -96,9 +103,36 @@ function spawnCharacter(_, player_color, alt_click, char_label)
 
         if matched_pw_char ~= nil then
             char_label = matched_pw_char
-        elseif alt_click then -- if right click, spawn a random character
-            char_label = collection_characters[math.random(#collection_characters)]
-        else -- if left click, spawn the full collection
+        elseif is_random_click then -- if right click (by default), spawn a random character
+            if collection_weights == nil then
+                char_label = collection_characters[math.random(#collection_characters)]
+            else
+                local total_weight = 0
+                local effective_weights = {}
+                for _, char in ipairs(collection_characters) do
+                    local char_weight = 1
+                    if collection_weights[char] ~= nil then
+                        char_weight = collection_weights[char]
+                    end
+                    total_weight = total_weight + char_weight
+                    effective_weights[char] = char_weight
+                end
+                roll = math.random() * total_weight
+                for char, weight in pairs(effective_weights) do
+                    if roll <= weight then
+                        char_label = char
+                        break
+                    else
+                        roll = roll - weight
+                    end
+                end
+            end
+
+            -- also print their spawn message if they have one
+            if collection_passwords[char_label] ~= nil then
+                printToColor(collection_passwords[char_label].message, player_color, {r=0, g=0, b=0})    
+            end
+        else -- if left click (by default), spawn the full collection
             local season_json_list = {}
             for _, single_json in ipairs(collection_characters) do
                 table.insert(season_json_list, char_json_map[single_json])

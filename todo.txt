@@ -1,6 +1,1 @@
-board features:
-- weighted random characters
-- show message for password characters when spawned normally
-- allow group buttons to be random or bag only
-- escape single quotes on hidden character messages
-- tooltip explanations
+all done for now yay
